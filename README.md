@@ -19,6 +19,7 @@ data/  (BAG-Excel)  ──►  etl/build_db.py  ──►  db/praemien_<jahr>.sq
 | Datenbank | SQLite, **eine Datei pro Prämienjahr** | Die Daten werden nur gelesen. Die Datei ist rund 27 MB gross und lässt sich atomar ersetzen. Es braucht keinen DB-Server. |
 | Backend | FastAPI | Typisierte REST-API, OpenAPI-Doku unter `/api/docs`, Validierung mit pydantic. |
 | Frontend | Vanilla JS (ES-Module) + CSS, ohne Build-Schritt | Es gibt nur eine Seite. So braucht es kein Node-Tooling, und FastAPI liefert das Frontend direkt aus. |
+| Design | angelehnt an finanu.ch | Schrift Raleway (Google Fonts), Farben #50B8E7/#11A3E6/#34ACE3, runde Ecken und hellblaue Flächen. Alle Farben sind als CSS-Variablen oben in `frontend/styles.css` definiert, inkl. Dark Mode. |
 | Leads | eigene SQLite-Datei `leads.sqlite` + SMTP | Leads bleiben unabhängig von der jährlich ersetzten Prämien-DB erhalten. |
 
 ## Setup

@@ -283,7 +283,7 @@ function zeichneResultat() {
   kz.replaceChildren();
   if (r.angebote.length) {
     const g = r.angebote[0];
-    kz.append(el("div", { class: "kennzahl" },
+    kz.append(el("div", { class: "kennzahl haupt" },
       el("span", {}, t("resultat.guenstigste")),
       el("strong", {}, chf(g.monat), el("small", {}, ` ${t("pro_monat")}`)),
       el("small", {}, `${g.versicherer} · ${g.tarifbezeichnung}`)));
