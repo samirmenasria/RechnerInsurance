@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="de-CH">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prämienrechner Grundversicherung</title>
+  <meta name="description" content="Prämien der obligatorischen Krankenpflegeversicherung (OKP) aller Krankenversicherer vergleichen.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="kopf">
+    <div class="wrap">
+      <h1 data-i18n="app.titel">Prämienrechner Grundversicherung</h1>
+      <p data-i18n="app.untertitel"></p>
+    </div>
+  </header>
+
+  <main class="wrap layout">
+    <!-- ================================================= Eingaben -->
+    <section class="karte eingaben" aria-labelledby="form-titel">
+      <h2 id="form-titel" data-i18n="form.titel"></h2>
+      <form id="rechner" novalidate autocomplete="off">
+        <div class="feld">
+          <label for="ort" data-i18n="form.ort"></label>
+          <div class="ort-suche" id="ort-suche">
+            <input id="ort" type="text" inputmode="search" role="combobox" aria-autocomplete="list"
+                   aria-expanded="false" aria-controls="ort-liste" data-i18n-placeholder="form.ort.platzhalter">
+            <ul id="ort-liste" class="vorschlaege" role="listbox" hidden></ul>
+          </div>
+          <p class="meldung" id="ort-meldung" hidden></p>
+          <div class="gewaehlt" id="ort-gewaehlt" hidden>
+            <span id="ort-gewaehlt-text"></span>
+            <button type="button" class="link" id="ort-aendern" data-i18n="form.ort.aendern"></button>
+          </div>
+          <p class="hilfe" data-i18n="form.ort.hilfe"></p>
+        </div>
+
+        <div class="feld">
+          <label for="geburtsjahr" data-i18n="form.geburtsjahr"></label>
+          <input id="geburtsjahr" type="number" inputmode="numeric" min="1900" max="2100" step="1" placeholder="1985">
+          <p class="hilfe" id="geburtsjahr-info" aria-live="polite"></p>
+        </div>
+
+        <fieldset class="feld">
+          <legend data-i18n="form.unfall"></legend>
+          <div class="segment">
+            <label><input type="radio" name="unfall" value="true" checked> <span data-i18n="form.unfall.ja"></span></label>
+            <label><input type="radio" name="unfall" value="false"> <span data-i18n="form.unfall.nein"></span></label>
+          </div>
+          <p class="hilfe" data-i18n="form.unfall.hilfe"></p>
+        </fieldset>
+
+        <div class="feld">
+          <label for="franchise" data-i18n="form.franchise"></label>
+          <select id="franchise" disabled></select>
+        </div>
+
+        <div class="feld">
+          <label for="modell" data-i18n="form.modell"></label>
+          <select id="modell"></select>
+        </div>
+
+        <div class="feld" id="kinderrabatt-feld" hidden>
+          <label class="check"><input type="checkbox" id="kinderrabatt"> <span data-i18n="form.kinderrabatt"></span></label>
+          <p class="hilfe" data-i18n="form.kinderrabatt.hilfe"></p>
+        </div>
+
+        <details class="feld aktuell">
+          <summary data-i18n="form.aktuell"></summary>
+          <label for="aktueller-versicherer" class="sr-only" data-i18n="form.aktuell"></label>
+          <select id="aktueller-versicherer"></select>
+          <label for="aktuelle-praemie" data-i18n="form.aktuell.praemie"></label>
+          <input id="aktuelle-praemie" type="number" inputmode="decimal" min="0" step="0.05">
+          <p class="hilfe" data-i18n="form.aktuell.hilfe"></p>
+        </details>
+
+        <button type="submit" class="primaer" id="berechnen" data-i18n="form.berechnen"></button>
+      </form>
+    </section>
+
+    <!-- ================================================= Resultate -->
+    <section class="resultate" aria-live="polite">
+      <div class="karte" id="resultat-leer"><p data-i18n="resultat.leer"></p></div>
+
+      <div id="resultat" hidden>
+        <div class="karte zusammenfassung">
+          <div>
+            <h2 id="resultat-titel"></h2>
+            <p class="kontext" id="resultat-kontext"></p>
+          </div>
+          <div class="kennzahlen" id="kennzahlen"></div>
+        </div>
+
+        <div class="karte">
+          <input type="search" id="filter" class="filter" data-i18n-placeholder="resultat.filter">
+          <div class="scroll"><table class="tabelle" id="tabelle">
+            <thead>
+              <tr>
+                <th data-i18n="spalte.rang"></th>
+                <th data-i18n="spalte.versicherer"></th>
+                <th data-i18n="spalte.modell"></th>
+                <th class="zahl" data-i18n="spalte.praemie"></th>
+                <th class="zahl" data-i18n="spalte.diff_guenstigste"></th>
+                <th class="zahl spalte-aktuell" data-i18n="spalte.diff_aktuell"></th>
+                <th><span class="sr-only" data-i18n="spalte.aktion"></span></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table></div>
+          <p class="meldung" id="keine-angebote" hidden data-i18n="resultat.keine"></p>
+          <button type="button" class="sekundaer" id="mehr" hidden></button>
+        </div>
+
+        <div class="karte" id="kosten">
+          <h2 data-i18n="kosten.titel"></h2>
+          <p class="hilfe" id="kosten-text"></p>
+          <div class="kosten-eingabe">
+            <div class="feld">
+              <label for="kosten-betrag" data-i18n="kosten.erwartet"></label>
+              <input id="kosten-betrag" type="number" min="0" step="100" value="1000">
+              <input id="kosten-slider" type="range" min="0" max="15000" step="100" value="1000" aria-hidden="true" tabindex="-1">
+            </div>
+            <div class="feld">
+              <label for="kosten-tarif" data-i18n="kosten.angebot"></label>
+              <select id="kosten-tarif"></select>
+            </div>
+          </div>
+          <div class="scroll"><table class="tabelle kosten-tabelle" id="kosten-tabelle">
+            <thead>
+              <tr>
+                <th data-i18n="kosten.franchise"></th>
+                <th data-i18n="kosten.angebot"></th>
+                <th class="zahl" data-i18n="kosten.praemie"></th>
+                <th class="zahl" data-i18n="kosten.franchiseanteil"></th>
+                <th class="zahl" data-i18n="kosten.selbstbehalt"></th>
+                <th class="zahl" data-i18n="kosten.total"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="fuss">
+    <div class="wrap">
+      <p id="footer-quelle"></p>
+      <p data-i18n="footer.hinweis"></p>
+      <p id="footer-einzugsgebiete" hidden data-i18n="footer.einzugsgebiete"></p>
+    </div>
+  </footer>
+
+  <!-- ================================================= Dialog Versicherer -->
+  <dialog id="dlg-versicherer" class="dialog">
+    <div class="dialog-kopf">
+      <h2 id="vers-titel"></h2>
+      <button type="button" class="schliessen" data-close aria-label="Schliessen">×</button>
+    </div>
+    <div id="vers-inhalt"></div>
+  </dialog>
+
+  <!-- ================================================= Dialog Anfrage -->
+  <dialog id="dlg-anfrage" class="dialog">
+    <div class="dialog-kopf">
+      <h2 data-i18n="anfrage.titel"></h2>
+      <button type="button" class="schliessen" data-close aria-label="Schliessen">×</button>
+    </div>
+    <div id="anfrage-formular-bereich">
+      <p data-i18n="anfrage.text"></p>
+      <div class="wahl" id="anfrage-wahl"></div>
+      <form id="anfrage-form" novalidate>
+        <div class="raster">
+          <div class="feld">
+            <label for="a-anrede" data-i18n="anfrage.anrede"></label>
+            <select id="a-anrede" name="anrede">
+              <option value="Frau" data-i18n="anfrage.anrede.frau"></option>
+              <option value="Herr" data-i18n="anfrage.anrede.herr"></option>
+              <option value="Keine Angabe" data-i18n="anfrage.anrede.keine" selected></option>
+            </select>
+          </div>
+          <div class="feld"></div>
+          <div class="feld">
+            <label for="a-vorname"><span data-i18n="anfrage.vorname"></span> *</label>
+            <input id="a-vorname" name="vorname" required maxlength="80" autocomplete="given-name">
+          </div>
+          <div class="feld">
+            <label for="a-nachname"><span data-i18n="anfrage.nachname"></span> *</label>
+            <input id="a-nachname" name="nachname" required maxlength="80" autocomplete="family-name">
+          </div>
+          <div class="feld">
+            <label for="a-email"><span data-i18n="anfrage.email"></span> *</label>
+            <input id="a-email" name="email" type="email" required maxlength="120" autocomplete="email">
+          </div>
+          <div class="feld">
+            <label for="a-telefon"><span data-i18n="anfrage.telefon"></span> *</label>
+            <input id="a-telefon" name="telefon" type="tel" required maxlength="40" autocomplete="tel" minlength="6">
+          </div>
+          <div class="feld">
+            <label for="a-strasse" data-i18n="anfrage.strasse"></label>
+            <input id="a-strasse" name="strasse" maxlength="120" autocomplete="street-address">
+          </div>
+          <div class="feld">
+            <label for="a-geburtsdatum" data-i18n="anfrage.geburtsdatum"></label>
+            <input id="a-geburtsdatum" name="geburtsdatum" type="date">
+          </div>
+          <div class="feld breit">
+            <label for="a-erreichbarkeit" data-i18n="anfrage.erreichbarkeit"></label>
+            <input id="a-erreichbarkeit" name="erreichbarkeit" maxlength="120" data-i18n-placeholder="anfrage.erreichbarkeit.platzhalter">
+          </div>
+          <div class="feld breit">
+            <label for="a-bemerkung" data-i18n="anfrage.bemerkung"></label>
+            <textarea id="a-bemerkung" name="bemerkung" rows="3" maxlength="2000" data-i18n-placeholder="anfrage.bemerkung.platzhalter"></textarea>
+          </div>
+          <div class="hp" aria-hidden="true">
+            <label for="a-website">Website</label>
+            <input id="a-website" name="website" tabindex="-1" autocomplete="off">
+          </div>
+          <div class="feld breit">
+            <label class="check"><input type="checkbox" id="a-einwilligung" name="einwilligung" required>
+              <span data-i18n="anfrage.einwilligung"></span> *</label>
+          </div>
+        </div>
+        <p class="meldung fehler" id="anfrage-fehler" hidden></p>
+        <button type="submit" class="primaer" id="anfrage-senden" data-i18n="anfrage.senden"></button>
+      </form>
+    </div>
+    <div id="anfrage-danke" hidden>
+      <h3 data-i18n="anfrage.danke.titel"></h3>
+      <p id="anfrage-danke-text"></p>
+      <button type="button" class="sekundaer" data-close data-i18n="allgemein.schliessen"></button>
+    </div>
+  </dialog>
+</body>
+</html>

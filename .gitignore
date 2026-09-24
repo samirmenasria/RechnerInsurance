@@ -1,5 +1,6 @@
-# Generierte Datenbanken
-db/*.sqlite
+# Generierte Datenbanken, Reports, Leads und Outbox
+db/
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
