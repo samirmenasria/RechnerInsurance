@@ -200,3 +200,76 @@ def test_einzugsgebiet_filter(db_kopie, tmp_path):
         zh = [a["tarif_id"] for a in c.get("/api/praemien", params={**p, "bfs": 261}).json()["angebote"]]
         andere = [a["tarif_id"] for a in c.get("/api/praemien", params={**p, "bfs": 230}).json()["angebote"]]  # Winterthur
         assert tarif_id in zh and tarif_id not in andere
+
+
+FAMILIE = [
+    {"name": "Anna", "geburtsjahr": 1985, "mit_unfall": True, "franchise": "FRA-2500"},
+    {"name": "Marco", "geburtsjahr": 1983, "mit_unfall": False, "franchise": "FRA-2500"},
+    {"name": "Lea", "geburtsjahr": 2014, "mit_unfall": True, "franchise": "FRA-0"},
+    {"name": "Tim", "geburtsjahr": 2018, "mit_unfall": True, "franchise": "FRA-0"},
+]
+
+
+def _einzeln(client, p, **kw):
+    return client.get("/api/praemien", params=dict(bfs=261, geburtsjahr=p["geburtsjahr"], unfall=p["mit_unfall"],
+                                                   franchise=p["franchise"], **kw)).json()["angebote"]
+
+
+def test_haushalt_einzelperson_gleich_wie_praemien(client):
+    p = FAMILIE[0]
+    h = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": [p]}).json()
+    einzeln = _einzeln(client, p)
+    assert [a["monat"] for a in h["gemeinsam"]["angebote"]] == [a["monat"] for a in einzeln]
+    assert h["kombination"]["monat"] == einzeln[0]["monat"]
+
+
+def test_haushalt_gemeinsam_ist_summe(client):
+    h = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": FAMILIE, "kinderrabatt": False}).json()
+    assert [p["name"] for p in h["personen"]] == ["Anna", "Marco", "Lea", "Tim"]
+    einzeln = [{a["tarif_id"]: a["monat"] for a in _einzeln(client, p)} for p in FAMILIE]
+    gemeinsame = set(einzeln[0]).intersection(*einzeln[1:])
+    assert h["gemeinsam"]["anzahl"] == len(gemeinsame)
+    monate = [a["monat"] for a in h["gemeinsam"]["angebote"]]
+    assert monate == sorted(monate)
+    for a in h["gemeinsam"]["angebote"][:20]:
+        assert a["monat"] == pytest.approx(sum(e[a["tarif_id"]] for e in einzeln), abs=0.005)
+        assert [z["name"] for z in a["personen"]] == ["Anna", "Marco", "Lea", "Tim"]
+        assert len({z["tarif_id"] for z in a["personen"]}) == 1
+
+
+def test_haushalt_kombination_ist_minimum_pro_person(client):
+    h = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": FAMILIE, "kinderrabatt": False}).json()
+    kb = h["kombination"]
+    for p, z in zip(FAMILIE, kb["personen"]):
+        assert z["monat"] == _einzeln(client, p)[0]["monat"]
+    assert kb["monat"] == pytest.approx(sum(z["monat"] for z in kb["personen"]), abs=0.005)
+    assert kb["monat"] <= h["gemeinsam"]["angebote"][0]["monat"]
+    assert kb["diff_gemeinsam_monat"] <= 0
+
+
+def test_haushalt_geschwisterrabatt(client):
+    """Ältestes Kind zahlt K1, weitere Kinder erhalten die günstigste Rabattstufe."""
+    ohne = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": FAMILIE, "kinderrabatt": False}).json()
+    mit = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": FAMILIE, "kinderrabatt": True}).json()
+    assert [p["geschwisterrabatt"] for p in mit["personen"]] == [False, False, False, True]
+    visana_ohne = next(a for a in ohne["gemeinsam"]["angebote"] if a["bag_nr"] == 1555 and a["tarif_code"] == "BASE")
+    visana_mit = next(a for a in mit["gemeinsam"]["angebote"] if a["tarif_id"] == visana_ohne["tarif_id"])
+    lea_mit, tim_mit = visana_mit["personen"][2], visana_mit["personen"][3]
+    assert lea_mit["altersuntergruppe"] == "K1" and tim_mit["altersuntergruppe"] == "K3"
+    assert visana_mit["monat"] < visana_ohne["monat"]
+
+
+def test_haushalt_aktueller_versicherer(client):
+    h = client.post("/api/haushalt", json={"bfs_nr": 261, "personen": FAMILIE, "aktueller_versicherer": 1562,
+                                           "modell": "TAR-HMO"}).json()
+    assert h["aktuell"]["bag_nr"] == 1562 and len(h["aktuell"]["personen"]) == 4
+    assert all(z["tariftyp"] == "TAR-BASE" for z in h["aktuell"]["personen"])
+    a = h["gemeinsam"]["angebote"][0]
+    assert a["diff_aktuell_monat"] == pytest.approx(a["monat"] - h["aktuell"]["monat"], abs=0.005)
+
+
+def test_haushalt_validierung(client):
+    zu_viele = [FAMILIE[0]] * 11
+    assert client.post("/api/haushalt", json={"bfs_nr": 261, "personen": zu_viele}).status_code == 422
+    falsch = [{**FAMILIE[2], "franchise": "FRA-2500"}]
+    assert client.post("/api/haushalt", json={"bfs_nr": 261, "personen": falsch}).status_code == 422

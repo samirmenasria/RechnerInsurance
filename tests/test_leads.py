@@ -52,16 +52,28 @@ def smtp_client(settings, smtp):
         yield c
 
 
+PERSON = {"name": "Anna Muster", "geburtsjahr": 1985, "mit_unfall": True, "franchise": "FRA-300"}
+
+
+def _haushalt(client, personen=None, **kw):
+    body = {"bfs_nr": 2196, "personen": personen or [PERSON], "aktueller_versicherer": 1562, **kw}
+    r = client.post("/api/haushalt", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def _angebot(client, rang=3):
-    res = client.get("/api/praemien", params=dict(bfs=2196, geburtsjahr=1985, unfall=True, franchise="FRA-300",
-                                                  aktueller_versicherer=1562)).json()
-    return res["angebote"][rang - 1], res
+    res = _haushalt(client)
+    return res["gemeinsam"]["angebote"][rang - 1], res
 
 
-def _body(tarif_id, **kw):
+def _body(tarif_id, personen=None, **kw):
+    personen = personen or [PERSON]
+    tarife = tarif_id if isinstance(tarif_id, list) else [tarif_id] * len(personen)
     b = {
-        "bfs_nr": 2196, "geburtsjahr": 1985, "mit_unfall": True, "franchise": "FRA-300", "modell": None,
-        "kinderrabatt": False, "tarif_id": tarif_id, "aktueller_versicherer": 1562, "einwilligung": True,
+        "bfs_nr": 2196, "modell": None, "kinderrabatt": True, "modus": "gemeinsam",
+        "personen": [{**p, "tarif_id": t} for p, t in zip(personen, tarife)],
+        "aktueller_versicherer": 1562, "einwilligung": True,
         "kontakt": {"anrede": "Frau", "vorname": "Anna", "nachname": "Muster", "email": "anna.muster@example.ch",
                     "telefon": "079 123 45 67", "strasse": "Bahnhofstrasse 1", "bemerkung": "Bitte abends anrufen"},
     }
@@ -89,6 +101,7 @@ def test_lead_wird_an_empfaenger_gesendet(smtp_client, smtp):
     con = sqlite3.connect(smtp_client.settings.leads_db)
     row = con.execute("SELECT status, empfaenger, tarif_id, monat, daten FROM lead").fetchone()
     assert row[:4] == ("gesendet", "malik.gobbi@dl-finance.ch", angebot["tarif_id"], angebot["monat"])
+    assert "Anna Muster" in json.loads(row[4])["personen"][0]["name"]
     assert json.loads(row[4])["kontakt"]["email"] == "anna.muster@example.ch"
 
 
@@ -96,6 +109,7 @@ def test_praemie_wird_serverseitig_berechnet(smtp_client, smtp):
     angebot, _ = _angebot(smtp_client)
     body = _body(angebot["tarif_id"])
     body["monat"] = 1.00  # manipulierter Wert aus dem Browser wird ignoriert
+    body["personen"][0]["monat"] = 1.00
     assert smtp_client.post("/api/anfrage", json=body).status_code == 201
     text = email.message_from_bytes(bytes(smtp.gesendet[0]), policy=policy.default).get_body(("plain",)).get_content()
     assert f"{angebot['monat']:.2f}" in text and "CHF 1.00" not in text
@@ -164,3 +178,52 @@ def test_rate_limit(settings, smtp):
         angebot, _ = _angebot(c)
         codes = [c.post("/api/anfrage", json=_body(angebot["tarif_id"])).status_code for _ in range(3)]
     assert codes == [201, 201, 429]
+
+
+FAMILIE = [
+    {"name": "Anna Muster", "geburtsjahr": 1985, "mit_unfall": True, "franchise": "FRA-2500"},
+    {"name": "Marco Muster", "geburtsjahr": 1983, "mit_unfall": False, "franchise": "FRA-2500"},
+    {"name": "Lea Muster", "geburtsjahr": 2014, "mit_unfall": True, "franchise": "FRA-0"},
+    {"name": "Tim Muster", "geburtsjahr": 2018, "mit_unfall": True, "franchise": "FRA-0"},
+]
+
+
+def test_familie_gemeinsam(smtp_client, smtp):
+    res = _haushalt(smtp_client, FAMILIE)
+    angebot = res["gemeinsam"]["angebote"][0]
+    r = smtp_client.post("/api/anfrage", json=_body(angebot["tarif_id"], FAMILIE))
+    assert r.status_code == 201, r.text
+    msg = email.message_from_bytes(bytes(smtp.gesendet[0]), policy=policy.default)
+    assert "(4 Personen)" in msg["Subject"] and "Fribourg" in msg["Subject"]
+    text = msg.get_body(("plain",)).get_content()
+    for p, z in zip(FAMILIE, angebot["personen"]):
+        assert p["name"] in text and f"Jahrgang {p['geburtsjahr']}" in text and f"{z['monat']:.2f}" in text
+    assert "alle beim gleichen Versicherer" in text
+    assert f"{angebot['monat']:,.2f}".replace(",", "'") in text  # Total Haushalt
+
+
+def test_familie_kombination(smtp_client, smtp):
+    res = _haushalt(smtp_client, FAMILIE)
+    tarife = [z["tarif_id"] for z in res["kombination"]["personen"]]
+    r = smtp_client.post("/api/anfrage", json=_body(tarife, FAMILIE, modus="kombination"))
+    assert r.status_code == 201, r.text
+    text = email.message_from_bytes(bytes(smtp.gesendet[0]), policy=policy.default).get_body(("plain",)).get_content()
+    assert "günstigste Kombination" in text
+    assert f"{res['kombination']['monat']:.2f}" in text
+    for z in res["kombination"]["personen"]:
+        assert z["versicherer"] in text
+
+
+def test_gemeinsam_verlangt_gleichen_tarif(smtp_client, smtp):
+    res = _haushalt(smtp_client, FAMILIE)
+    tarife = [z["tarif_id"] for z in res["kombination"]["personen"]]
+    assert len(set(tarife)) > 1
+    r = smtp_client.post("/api/anfrage", json=_body(tarife, FAMILIE, modus="gemeinsam"))
+    assert r.status_code == 422 and not smtp.gesendet
+
+
+def test_personen_brauchen_namen(smtp_client, smtp):
+    angebot, _ = _angebot(smtp_client)
+    b = _body(angebot["tarif_id"])
+    b["personen"][0]["name"] = ""
+    assert smtp_client.post("/api/anfrage", json=b).status_code == 422

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#50b8e7">
   <title>Prämienrechner Grundversicherung</title>
-  <meta name="description" content="Prämien der obligatorischen Krankenpflegeversicherung (OKP) aller Krankenversicherer vergleichen.">
+  <meta name="description" content="Prämien der obligatorischen Krankenpflegeversicherung (OKP) aller Krankenversicherer vergleichen – für Einzelpersonen, Paare und Familien.">
   <link rel="icon" href="data:,">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -41,33 +41,17 @@
           <p class="hilfe" data-i18n="form.ort.hilfe"></p>
         </div>
 
-        <div class="feld">
-          <label for="geburtsjahr" data-i18n="form.geburtsjahr"></label>
-          <input id="geburtsjahr" type="number" inputmode="numeric" min="1900" max="2100" step="1" placeholder="1985">
-          <p class="hilfe" id="geburtsjahr-info" aria-live="polite"></p>
-        </div>
+        <!-- Personen (Einzelperson, Paar, Familie) -->
+        <div id="personen"></div>
+        <button type="button" class="sekundaer voll" id="person-plus" data-i18n="form.person.plus"></button>
 
-        <fieldset class="feld">
-          <legend data-i18n="form.unfall"></legend>
-          <div class="segment">
-            <label><input type="radio" name="unfall" value="true" checked> <span data-i18n="form.unfall.ja"></span></label>
-            <label><input type="radio" name="unfall" value="false"> <span data-i18n="form.unfall.nein"></span></label>
-          </div>
-          <p class="hilfe" data-i18n="form.unfall.hilfe"></p>
-        </fieldset>
-
-        <div class="feld">
-          <label for="franchise" data-i18n="form.franchise"></label>
-          <select id="franchise" disabled></select>
-        </div>
-
-        <div class="feld">
+        <div class="feld abstand-oben">
           <label for="modell" data-i18n="form.modell"></label>
           <select id="modell"></select>
         </div>
 
         <div class="feld" id="kinderrabatt-feld" hidden>
-          <label class="check"><input type="checkbox" id="kinderrabatt"> <span data-i18n="form.kinderrabatt"></span></label>
+          <label class="check"><input type="checkbox" id="kinderrabatt" checked> <span data-i18n="form.kinderrabatt"></span></label>
           <p class="hilfe" data-i18n="form.kinderrabatt.hilfe"></p>
         </div>
 
@@ -75,7 +59,7 @@
           <summary data-i18n="form.aktuell"></summary>
           <label for="aktueller-versicherer" class="sr-only" data-i18n="form.aktuell"></label>
           <select id="aktueller-versicherer"></select>
-          <label for="aktuelle-praemie" data-i18n="form.aktuell.praemie"></label>
+          <label for="aktuelle-praemie" id="aktuelle-praemie-label" data-i18n="form.aktuell.praemie"></label>
           <input id="aktuelle-praemie" type="number" inputmode="decimal" min="0" step="0.05">
           <p class="hilfe" data-i18n="form.aktuell.hilfe"></p>
         </details>
@@ -90,14 +74,22 @@
 
       <div id="resultat" hidden>
         <div class="karte zusammenfassung">
-          <div>
-            <h2 id="resultat-titel"></h2>
-            <p class="kontext" id="resultat-kontext"></p>
+          <div class="zusammenfassung-kopf">
+            <div>
+              <h2 id="resultat-titel"></h2>
+              <p class="kontext" id="resultat-kontext"></p>
+            </div>
+            <div class="modus" id="modus" role="radiogroup" hidden>
+              <button type="button" role="radio" data-modus="gemeinsam" data-i18n="modus.gemeinsam"></button>
+              <button type="button" role="radio" data-modus="kombination" data-i18n="modus.kombination"></button>
+            </div>
           </div>
+          <p class="hilfe" id="modus-hilfe" hidden></p>
           <div class="kennzahlen" id="kennzahlen"></div>
         </div>
 
-        <div class="karte">
+        <!-- Variante: alle beim gleichen Versicherer -->
+        <div class="karte" id="ansicht-gemeinsam">
           <input type="search" id="filter" class="filter" data-i18n-placeholder="resultat.filter">
           <div class="scroll"><table class="tabelle" id="tabelle">
             <thead>
@@ -105,8 +97,7 @@
                 <th data-i18n="spalte.rang"></th>
                 <th data-i18n="spalte.versicherer"></th>
                 <th data-i18n="spalte.modell"></th>
-                <th class="zahl" data-i18n="spalte.praemie"></th>
-                <th class="zahl" data-i18n="spalte.diff_guenstigste"></th>
+                <th class="zahl" id="spalte-praemie" data-i18n="spalte.praemie"></th>
                 <th class="zahl spalte-aktuell" data-i18n="spalte.diff_aktuell"></th>
                 <th><span class="sr-only" data-i18n="spalte.aktion"></span></th>
               </tr>
@@ -117,10 +108,34 @@
           <button type="button" class="sekundaer" id="mehr" hidden></button>
         </div>
 
+        <!-- Variante: günstigste Kombination -->
+        <div class="karte" id="ansicht-kombination" hidden>
+          <h2 data-i18n="kombination.titel"></h2>
+          <p class="hilfe" data-i18n="kombination.text"></p>
+          <div class="scroll"><table class="tabelle" id="kombi-tabelle">
+            <thead>
+              <tr>
+                <th data-i18n="kombination.person"></th>
+                <th data-i18n="spalte.versicherer"></th>
+                <th data-i18n="spalte.modell"></th>
+                <th class="zahl" data-i18n="kombination.praemie"></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+            <tfoot></tfoot>
+          </table></div>
+          <p class="meldung" id="kombi-keine" hidden data-i18n="kombination.keine"></p>
+          <button type="button" class="primaer kombi-anfragen" id="kombi-anfragen" data-i18n="kombination.anfragen"></button>
+        </div>
+
         <div class="karte" id="kosten">
           <h2 data-i18n="kosten.titel"></h2>
           <p class="hilfe" id="kosten-text"></p>
           <div class="kosten-eingabe">
+            <div class="feld" id="kosten-person-feld" hidden>
+              <label for="kosten-person" data-i18n="kosten.person"></label>
+              <select id="kosten-person"></select>
+            </div>
             <div class="feld">
               <label for="kosten-betrag" data-i18n="kosten.erwartet"></label>
               <input id="kosten-betrag" type="number" min="0" step="100" value="1000">
@@ -157,6 +172,36 @@
     </div>
   </footer>
 
+  <!-- Vorlage für eine Person -->
+  <template id="person-vorlage">
+    <fieldset class="person">
+      <div class="person-kopf">
+        <legend class="person-titel"></legend>
+        <button type="button" class="link person-entfernen" data-i18n="form.person.entfernen"></button>
+      </div>
+      <div class="feld">
+        <label data-feld="name" data-i18n="form.person.name"></label>
+        <input type="text" class="p-name" maxlength="80" autocomplete="off" data-i18n-placeholder="form.person.name.platzhalter">
+      </div>
+      <div class="feld">
+        <label data-feld="jahr" data-i18n="form.geburtsjahr"></label>
+        <input type="number" class="p-jahr" inputmode="numeric" min="1900" max="2100" step="1" placeholder="1985">
+        <p class="hilfe p-info" aria-live="polite"></p>
+      </div>
+      <div class="feld">
+        <span class="label" data-i18n="form.unfall"></span>
+        <div class="segment">
+          <label><input type="radio" class="p-unfall" value="true" checked> <span data-i18n="form.unfall.ja"></span></label>
+          <label><input type="radio" class="p-unfall" value="false"> <span data-i18n="form.unfall.nein"></span></label>
+        </div>
+      </div>
+      <div class="feld">
+        <label data-feld="franchise" data-i18n="form.franchise"></label>
+        <select class="p-franchise" disabled></select>
+      </div>
+    </fieldset>
+  </template>
+
   <!-- ================================================= Dialog Versicherer -->
   <dialog id="dlg-versicherer" class="dialog">
     <div class="dialog-kopf">
@@ -176,6 +221,10 @@
       <p data-i18n="anfrage.text"></p>
       <div class="wahl" id="anfrage-wahl"></div>
       <form id="anfrage-form" novalidate>
+        <h3 class="formular-titel" id="anfrage-personen-titel" data-i18n="anfrage.personen"></h3>
+        <div id="anfrage-personen" class="raster"></div>
+
+        <h3 class="formular-titel" data-i18n="anfrage.kontakt"></h3>
         <div class="raster">
           <div class="feld">
             <label for="a-anrede" data-i18n="anfrage.anrede"></label>

@@ -1,21 +1,27 @@
 // Prämienrechner OKP – Frontend (ohne Build-Schritt, ES-Module)
+// Rechnet für eine Person oder einen ganzen Haushalt (Paare, Familien).
 
 const SPRACHE = (new URLSearchParams(location.search).get("lang") || "de").slice(0, 2);
-const SEITE = 25; // Zeilen vor «alle anzeigen»
+const SEITE = 25;        // Zeilen vor «alle anzeigen»
+const MAX_PERSONEN = 10;
 
 const state = {
   texte: {},
   stamm: null,
   meta: null,
   gemeinde: null,        // gewählte Gemeinde (Objekt aus /api/orte)
-  altersklasse: null,    // {code, name, alter, praemienjahr}
-  resultat: null,
+  personen: [],          // [{id, el, akl}]
+  naechsteId: 1,
+  modus: "gemeinsam",    // gemeinsam | kombination
+  resultat: null,        // Antwort von /api/haushalt
+  kombiWahl: [],         // je Person gewählter Tarif in der Kombination
   alleZeigen: false,
-  anfrageAngebot: null,
+  anfrage: null,         // {modus, tarifIds, zeilen, monat}
 };
 
 // ------------------------------------------------------------------ Hilfsfunktionen
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const el = (tag, attrs = {}, ...kinder) => {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -39,7 +45,8 @@ function t(key, vars = {}) {
 const fmt = new Intl.NumberFormat("de-CH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmt0 = new Intl.NumberFormat("de-CH", { maximumFractionDigits: 0 });
 const chf = (v) => (v === null || v === undefined ? "–" : `CHF ${fmt.format(v)}`);
-const diff = (v) => (v === null || v === undefined ? "–" : v === 0 ? "–" : `${v > 0 ? "+" : "−"}${fmt.format(Math.abs(v))}`);
+const diff = (v) => (v === null || v === undefined || v === 0 ? "–" : `${v > 0 ? "+" : "−"}${fmt.format(Math.abs(v))}`);
+const rund = (v) => Math.round(v * 100) / 100;
 
 async function api(pfad, params, optionen = {}) {
   const url = new URL(pfad, location.origin);
@@ -52,6 +59,9 @@ async function api(pfad, params, optionen = {}) {
   }
   return daten;
 }
+const post = (pfad, body) => api(pfad, null, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+});
 
 function debounce(fn, ms) {
   let h;
@@ -78,21 +88,20 @@ async function init() {
   });
   $("#footer-einzugsgebiete").hidden = state.stamm.einzugsgebiete_vorhanden;
 
-  // Modelle
   const modell = $("#modell");
   modell.append(el("option", { value: "alle" }, t("form.modell.alle")));
   state.stamm.modelle.forEach((m) => modell.append(el("option", { value: m.code }, m.name_de)));
 
-  // Versicherer (aktuell)
   const akt = $("#aktueller-versicherer");
   akt.append(el("option", { value: "" }, t("form.aktuell.keiner")));
   state.stamm.versicherer.forEach((v) => akt.append(el("option", { value: v.bag_nr }, v.name_kurz)));
 
   bindeOrtssuche();
   bindeFormular();
+  bindeErgebnis();
   bindeKosten();
   bindeDialoge();
-  zustandAusUrl();
+  if (!(await zustandAusUrl())) personHinzufuegen();
 }
 
 // ------------------------------------------------------------------ Ortssuche
@@ -115,7 +124,6 @@ function bindeOrtssuche() {
       schliessen();
       return;
     }
-    // Eindeutige Gemeinde bei vollständiger PLZ -> direkt übernehmen
     if (treffer.length === 1 && /^\d{4}$/.test(daten.query)) {
       waehleGemeinde(treffer[0]);
       return;
@@ -127,7 +135,7 @@ function bindeOrtssuche() {
     treffer.forEach((g, i) => {
       const orte = g.orte.slice(0, 3).join(", ") + (g.orte.length > 3 ? " …" : "");
       liste.append(el("li", {
-        role: "option", id: `ort-opt-${i}`, "data-index": i,
+        role: "option", id: `ort-opt-${i}`,
         onmousedown: (e) => { e.preventDefault(); waehleGemeinde(g); },
       },
       el("span", {}, el("strong", {}, g.gemeinde), ` (${g.kanton})`),
@@ -170,7 +178,7 @@ function bindeOrtssuche() {
   });
 }
 
-function waehleGemeinde(g) {
+function waehleGemeinde(g, rechnen = true) {
   state.gemeinde = g;
   $("#ort-liste").hidden = true;
   $("#ort-meldung").hidden = true;
@@ -178,49 +186,94 @@ function waehleGemeinde(g) {
   $("#ort-suche").hidden = true;
   $("#ort-gewaehlt-text").textContent = t("form.ort.gewaehlt", { gemeinde: g.gemeinde, kanton: g.kanton, region: g.region_nr });
   $("#ort-gewaehlt").hidden = false;
+  if (rechnen) berechnenWennBereit();
+}
+
+// ------------------------------------------------------------------ Personen
+function personHinzufuegen(daten = {}) {
+  if (state.personen.length >= MAX_PERSONEN) return null;
+  const id = state.naechsteId++;
+  const node = $("#person-vorlage").content.firstElementChild.cloneNode(true);
+  uebersetzen(node);
+  // eindeutige IDs für Labels und Radio-Gruppen
+  const name = $(".p-name", node), jahr = $(".p-jahr", node), fr = $(".p-franchise", node);
+  name.id = `p${id}-name`; jahr.id = `p${id}-jahr`; fr.id = `p${id}-franchise`;
+  $("[data-feld=name]", node).htmlFor = name.id;
+  $("[data-feld=jahr]", node).htmlFor = jahr.id;
+  $("[data-feld=franchise]", node).htmlFor = fr.id;
+  $$(".p-unfall", node).forEach((r) => { r.name = `p${id}-unfall`; });
+
+  const person = { id, el: node, akl: null };
+  state.personen.push(person);
+  $("#personen").append(node);
+
+  if (daten.name) name.value = daten.name;
+  if (daten.unfall === false) $(".p-unfall[value=false]", node).checked = true;
+  jahr.addEventListener("input", debounce(() => aktualisiereAltersklasse(person), 250));
+  name.addEventListener("change", () => { if (state.resultat) berechnen(); });
+  fr.addEventListener("change", berechnenWennBereit);
+  $$(".p-unfall", node).forEach((r) => r.addEventListener("change", berechnenWennBereit));
+  $(".person-entfernen", node).addEventListener("click", () => personEntfernen(person));
+
+  nummeriere();
+  if (daten.geburtsjahr) {
+    jahr.value = daten.geburtsjahr;
+    return aktualisiereAltersklasse(person, daten.franchise, false).then(() => person);
+  }
+  return Promise.resolve(person);
+}
+
+function personEntfernen(person) {
+  state.personen = state.personen.filter((p) => p !== person);
+  person.el.remove();
+  nummeriere();
   berechnenWennBereit();
 }
 
-// ------------------------------------------------------------------ Formular
-function bindeFormular() {
-  const gj = $("#geburtsjahr");
-  gj.addEventListener("input", debounce(aktualisiereAltersklasse, 250));
-  ["#franchise", "#modell", "#kinderrabatt", "#aktueller-versicherer"].forEach((s) =>
-    $(s).addEventListener("change", berechnenWennBereit));
-  $("#aktuelle-praemie").addEventListener("input", debounce(berechnenWennBereit, 400));
-  document.querySelectorAll("input[name=unfall]").forEach((n) => n.addEventListener("change", berechnenWennBereit));
-  $("#rechner").addEventListener("submit", (e) => { e.preventDefault(); berechnen(); });
-  $("#filter").addEventListener("input", zeichneTabelle);
-  $("#mehr").addEventListener("click", () => { state.alleZeigen = !state.alleZeigen; zeichneTabelle(); });
+function nummeriere() {
+  const mehrere = state.personen.length > 1;
+  state.personen.forEach((p, i) => {
+    $(".person-titel", p.el).textContent = t("form.person.titel", { n: i + 1 });
+    $(".person-entfernen", p.el).hidden = !mehrere;
+  });
+  $("#person-plus").hidden = state.personen.length >= MAX_PERSONEN;
+  $("#aktuelle-praemie-label").textContent = mehrere ? t("form.aktuell.praemie.haushalt") : t("form.aktuell.praemie");
+  aktualisiereKinderrabattFeld();
 }
 
-async function aktualisiereAltersklasse() {
-  const jahr = parseInt($("#geburtsjahr").value, 10);
-  const info = $("#geburtsjahr-info");
-  const franchise = $("#franchise");
+function aktualisiereKinderrabattFeld() {
+  const kinder = state.personen.filter((p) => p.akl?.code === "AKL-KIN").length;
+  $("#kinderrabatt-feld").hidden = kinder < 2;
+}
+
+async function aktualisiereAltersklasse(person, gewuenschteFranchise, rechnen = true) {
+  const jahrInput = $(".p-jahr", person.el);
+  const info = $(".p-info", person.el);
+  const fr = $(".p-franchise", person.el);
+  const jahr = parseInt(jahrInput.value, 10);
   if (!jahr || jahr < 1900 || jahr > state.meta.praemienjahr) {
-    state.altersklasse = null;
-    info.textContent = $("#geburtsjahr").value.length >= 4 ? t("form.geburtsjahr.fehler") : "";
-    franchise.disabled = true;
+    person.akl = null;
+    info.textContent = jahrInput.value.length >= 4 ? t("form.geburtsjahr.fehler") : "";
+    fr.disabled = true;
+    aktualisiereKinderrabattFeld();
     return;
   }
   try {
     const akl = await api("/api/altersklasse", { geburtsjahr: jahr });
-    const alt = state.altersklasse?.code;
-    state.altersklasse = akl;
+    const alt = person.akl?.code;
+    person.akl = akl;
     info.textContent = t("form.geburtsjahr.info", { alter: akl.alter, jahr: akl.praemienjahr, klasse: akl.name });
-    $("#kinderrabatt-feld").hidden = akl.code !== "AKL-KIN";
-    if (alt !== akl.code) fuelleFranchisen(akl.code);
-    berechnenWennBereit();
+    if (alt !== akl.code || gewuenschteFranchise) fuelleFranchisen(fr, akl.code, gewuenschteFranchise);
+    aktualisiereKinderrabattFeld();
+    if (rechnen) berechnenWennBereit();
   } catch (e) {
-    state.altersklasse = null;
+    person.akl = null;
     info.textContent = e.message;
   }
 }
 
-function fuelleFranchisen(code, gewuenscht) {
+function fuelleFranchisen(sel, code, gewuenscht) {
   const klasse = state.stamm.altersklassen.find((a) => a.code === code);
-  const sel = $("#franchise");
   const bisher = gewuenscht || sel.value;
   sel.replaceChildren(...klasse.franchisen.map((f) =>
     el("option", { value: f.code }, `CHF ${fmt0.format(f.betrag)}${f.ist_ordentlich ? ` (${t("form.franchise.ordentlich")})` : ""}`)));
@@ -229,34 +282,58 @@ function fuelleFranchisen(code, gewuenscht) {
   sel.disabled = false;
 }
 
-function eingaben() {
+function personDaten(p, i) {
   return {
-    bfs: state.gemeinde?.bfs_nr,
-    geburtsjahr: parseInt($("#geburtsjahr").value, 10),
-    unfall: document.querySelector("input[name=unfall]:checked").value,
-    franchise: $("#franchise").value,
-    modell: $("#modell").value,
-    kinderrabatt: state.altersklasse?.code === "AKL-KIN" && $("#kinderrabatt").checked,
-    aktueller_versicherer: $("#aktueller-versicherer").value || null,
-    aktuelle_praemie: $("#aktuelle-praemie").value || null,
+    name: $(".p-name", p.el).value.trim() || t("form.person.titel", { n: i + 1 }),
+    geburtsjahr: parseInt($(".p-jahr", p.el).value, 10),
+    mit_unfall: $(".p-unfall:checked", p.el).value === "true",
+    franchise: $(".p-franchise", p.el).value,
   };
 }
 
-const bereit = () => state.gemeinde && state.altersklasse && $("#franchise").value;
+// ------------------------------------------------------------------ Formular / Berechnung
+function bindeFormular() {
+  $("#person-plus").addEventListener("click", async () => {
+    const p = await personHinzufuegen();
+    $(".p-name", p.el).focus();
+  });
+  ["#modell", "#kinderrabatt", "#aktueller-versicherer"].forEach((s) => $(s).addEventListener("change", berechnenWennBereit));
+  $("#aktuelle-praemie").addEventListener("input", debounce(berechnenWennBereit, 400));
+  $("#rechner").addEventListener("submit", (e) => { e.preventDefault(); berechnen(); });
+}
+
+function eingaben() {
+  return {
+    bfs_nr: state.gemeinde?.bfs_nr,
+    personen: state.personen.map(personDaten),
+    modell: $("#modell").value === "alle" ? null : $("#modell").value,
+    kinderrabatt: $("#kinderrabatt").checked,
+    aktueller_versicherer: $("#aktueller-versicherer").value ? parseInt($("#aktueller-versicherer").value, 10) : null,
+    aktuelle_praemie: $("#aktuelle-praemie").value ? parseFloat($("#aktuelle-praemie").value) : null,
+  };
+}
+
+const bereit = () => state.gemeinde && state.personen.length
+  && state.personen.every((p) => p.akl && $(".p-franchise", p.el).value);
 
 function berechnenWennBereit() { if (bereit()) berechnen(); }
 
 async function berechnen() {
   if (!bereit()) {
-    if (!state.gemeinde) $("#ort").focus();
-    else $("#geburtsjahr").focus();
+    if (!state.gemeinde) { $("#ort").focus(); return; }
+    const offen = state.personen.find((p) => !p.akl);
+    if (offen) $(".p-jahr", offen.el).focus();
     return;
   }
   const p = eingaben();
   try {
-    state.resultat = await api("/api/praemien", p);
+    state.resultat = await post("/api/haushalt", p);
+    state.kombiWahl = state.resultat.kombination
+      ? state.resultat.kombination.personen.map((x) => x.tarif_id) : [];
+    if (state.personen.length === 1) state.modus = "gemeinsam";
     state.alleZeigen = false;
     zeichneResultat();
+    fuellePersonenFuerKosten();
     ladeKosten();
     zustandInUrl(p);
   } catch (e) {
@@ -267,26 +344,74 @@ async function berechnen() {
 }
 
 // ------------------------------------------------------------------ Resultate
+function bindeErgebnis() {
+  $$("#modus button").forEach((b) => b.addEventListener("click", () => {
+    state.modus = b.dataset.modus;
+    zeichneResultat();
+    zustandInUrl(eingaben());
+  }));
+  $("#filter").addEventListener("input", zeichneTabelle);
+  $("#mehr").addEventListener("click", () => { state.alleZeigen = !state.alleZeigen; zeichneTabelle(); });
+  $("#kombi-anfragen").addEventListener("click", () => {
+    const zeilen = kombiZeilen();
+    oeffneAnfrage({ modus: "kombination", zeilen, monat: rund(zeilen.reduce((s, z) => s + z.monat, 0)) });
+  });
+}
+
+function personenText(personen) {
+  return personen.map((p) => `${p.name} (${p.geburtsjahr}, CHF ${fmt0.format(p.franchise_betrag)})`).join(", ");
+}
+
 function zeichneResultat() {
   const r = state.resultat;
-  const k = r.kontext;
+  const g = r.kontext.gemeinde;
+  const haushalt = r.personen.length > 1;
+  const gem = r.gemeinsam;
+  const kb = r.kombination;
   $("#resultat-leer").hidden = true;
   $("#resultat").hidden = false;
-  $("#resultat-titel").textContent = t("resultat.titel", { anzahl: r.anzahl });
-  $("#resultat-kontext").textContent = t("resultat.kontext", {
-    gemeinde: k.gemeinde.gemeinde, kanton: k.gemeinde.kanton, region: k.gemeinde.region_nr,
-    klasse: state.altersklasse.name, franchise: `CHF ${fmt0.format(k.franchise_betrag)}`,
-    unfall: k.mit_unfall ? t("form.unfall.ja") : t("form.unfall.nein"),
-  });
 
+  if (haushalt) {
+    $("#resultat-titel").textContent = t("resultat.titel.haushalt", { anzahl: r.personen.length });
+    $("#resultat-kontext").textContent = t("resultat.kontext.haushalt", {
+      gemeinde: g.gemeinde, kanton: g.kanton, region: g.region_nr, personen: personenText(r.personen),
+    });
+  } else {
+    const p = r.personen[0];
+    $("#resultat-titel").textContent = t("resultat.titel", { anzahl: gem.anzahl });
+    $("#resultat-kontext").textContent = t("resultat.kontext", {
+      gemeinde: g.gemeinde, kanton: g.kanton, region: g.region_nr, klasse: p.altersklasse_name,
+      franchise: `CHF ${fmt0.format(p.franchise_betrag)}`, unfall: p.mit_unfall ? t("form.unfall.ja") : t("form.unfall.nein"),
+    });
+  }
+
+  // Umschalter der Varianten
+  $("#modus").hidden = !haushalt;
+  $$("#modus button").forEach((b) => {
+    const an = b.dataset.modus === state.modus;
+    b.classList.toggle("an", an);
+    b.setAttribute("aria-checked", String(an));
+  });
+  $("#modus-hilfe").hidden = !haushalt;
+  $("#modus-hilfe").textContent = state.modus === "gemeinsam" ? t("modus.hilfe.gemeinsam") : t("modus.hilfe.kombination");
+  $("#ansicht-gemeinsam").hidden = haushalt && state.modus !== "gemeinsam";
+  $("#ansicht-kombination").hidden = !haushalt || state.modus !== "kombination";
+
+  // Kennzahlen
   const kz = $("#kennzahlen");
   kz.replaceChildren();
-  if (r.angebote.length) {
-    const g = r.angebote[0];
-    kz.append(el("div", { class: "kennzahl haupt" },
-      el("span", {}, t("resultat.guenstigste")),
-      el("strong", {}, chf(g.monat), el("small", {}, ` ${t("pro_monat")}`)),
-      el("small", {}, `${g.versicherer} · ${g.tarifbezeichnung}`)));
+  if (gem.angebote.length) {
+    const a = gem.angebote[0];
+    kz.append(el("div", { class: `kennzahl ${state.modus === "gemeinsam" ? "haupt" : ""}` },
+      el("span", {}, haushalt ? t("resultat.guenstigste_gemeinsam") : t("resultat.guenstigste")),
+      el("strong", {}, chf(a.monat), el("small", {}, ` ${t("pro_monat")}`)),
+      el("small", {}, `${a.versicherer} · ${a.tarifbezeichnung}`)));
+  }
+  if (haushalt && kb) {
+    kz.append(el("div", { class: `kennzahl ${state.modus === "kombination" ? "haupt" : ""}` },
+      el("span", {}, t("resultat.guenstigste_kombination")),
+      el("strong", {}, chf(kb.monat), el("small", {}, ` ${t("pro_monat")}`)),
+      el("small", {}, t("kombination.versicherer", { anzahl: kb.anzahl_versicherer }))));
   }
   if (r.aktuell) {
     const a = r.aktuell;
@@ -294,51 +419,49 @@ function zeichneResultat() {
       el("span", {}, t("resultat.aktuell")),
       el("strong", {}, chf(a.monat), el("small", {}, ` ${t("pro_monat")}`)),
       el("small", {}, a.versicherer ? `${a.versicherer} · ${a.tarifbezeichnung}` : "")));
-    if (r.angebote.length) {
-      const ersparnis = Math.max(0, (a.monat - r.angebote[0].monat) * 12);
+    const bester = state.modus === "kombination" && kb ? kb.monat : gem.angebote[0]?.monat;
+    if (bester !== undefined) {
       kz.append(el("div", { class: "kennzahl gut" },
-        el("span", {}, t("resultat.ersparnis")), el("strong", {}, chf(ersparnis))));
+        el("span", {}, t("resultat.ersparnis")), el("strong", {}, chf(Math.max(0, (a.monat - bester) * 12)))));
     }
   } else if (r.hinweis_aktuell) {
     kz.append(el("p", { class: "hilfe" }, r.hinweis_aktuell));
   }
 
+  $("#spalte-praemie").textContent = haushalt ? t("spalte.praemie.haushalt") : t("spalte.praemie");
   document.querySelectorAll(".spalte-aktuell").forEach((n) => { n.hidden = !r.aktuell; });
   zeichneTabelle();
-
-  // Tarifauswahl für Gesamtkosten
-  const sel = $("#kosten-tarif");
-  const bisher = sel.value;
-  sel.replaceChildren(el("option", { value: "" }, t("kosten.angebot.guenstigstes")),
-    ...r.angebote.slice(0, 50).map((a) => el("option", { value: a.tarif_id }, `${a.versicherer} – ${a.tarifbezeichnung}`)));
-  if ([...sel.options].some((o) => o.value === bisher)) sel.value = bisher;
+  zeichneKombination();
 }
 
 function zeichneTabelle() {
   const r = state.resultat;
   if (!r) return;
+  const haushalt = r.personen.length > 1;
   const q = $("#filter").value.trim().toLowerCase();
-  let zeilen = r.angebote.filter((a) => !q || `${a.versicherer} ${a.tarifbezeichnung} ${a.modell}`.toLowerCase().includes(q));
+  let zeilen = r.gemeinsam.angebote.filter((a) => !q || `${a.versicherer} ${a.tarifbezeichnung} ${a.modell}`.toLowerCase().includes(q));
   const total = zeilen.length;
   if (!state.alleZeigen && !q) zeilen = zeilen.slice(0, SEITE);
 
-  const body = $("#tabelle tbody");
-  body.replaceChildren(...zeilen.map((a) => el("tr", { class: a.ist_aktuell ? "ist-aktuell" : null },
+  $("#tabelle tbody").replaceChildren(...zeilen.map((a) => el("tr", { class: a.ist_aktuell ? "ist-aktuell" : null },
     el("td", { "data-label": t("spalte.rang") }, a.rang),
     el("td", { "data-label": t("spalte.versicherer") },
       el("button", { type: "button", class: "link", onclick: () => zeigeVersicherer(a.bag_nr) }, a.versicherer),
       a.ist_aktuell ? el("span", { class: "badge" }, t("zeile.aktuell")) : null),
     el("td", { "data-label": t("spalte.modell") },
-      el("span", { class: `modell modell-${a.tariftyp.toLowerCase()}` }, a.modell), " ",
-      a.tarifbezeichnung,
-      a.rabatt ? el("span", { class: "badge rabatt" }, t("zeile.rabatt", { code: a.altersuntergruppe })) : null),
-    el("td", { class: "zahl", "data-label": t("spalte.praemie") },
-      el("strong", {}, chf(a.monat)), el("small", { class: "unter" }, `${chf(a.jahr)} ${t("pro_jahr")}`)),
-    el("td", { class: "zahl", "data-label": t("spalte.diff_guenstigste") }, diff(a.diff_guenstigste_monat)),
+      el("span", { class: "modell" }, a.modell), " ", a.tarifbezeichnung,
+      a.rabatt ? el("span", { class: "badge rabatt" }, t("zeile.rabatt.kurz")) : null,
+      haushalt ? el("small", { class: "unter personen-aufteilung" },
+        a.personen.map((p) => `${p.name} ${fmt.format(p.monat)}`).join(" · ")) : null),
+    el("td", { class: "zahl", "data-label": haushalt ? t("spalte.praemie.haushalt") : t("spalte.praemie") },
+      el("strong", {}, chf(a.monat)), el("small", { class: "unter jahr" }, `${chf(a.jahr)} ${t("pro_jahr")}`),
+      a.diff_guenstigste_monat ? el("small", { class: "unter" }, t("zeile.diff_guenstigste", { diff: diff(a.diff_guenstigste_monat) })) : null),
     el("td", { class: `zahl spalte-aktuell ${a.diff_aktuell_monat < 0 ? "gut" : a.diff_aktuell_monat > 0 ? "schlecht" : ""}`,
       "data-label": t("spalte.diff_aktuell"), hidden: !r.aktuell }, diff(a.diff_aktuell_monat)),
     el("td", { class: "aktion" },
-      el("button", { type: "button", class: "primaer klein", title: t("anfrage.titel"), onclick: () => oeffneAnfrage(a) }, t("zeile.anfragen"))),
+      el("button", { type: "button", class: "primaer klein", title: t("anfrage.titel"),
+        onclick: () => oeffneAnfrage({ modus: "gemeinsam", zeilen: a.personen, monat: a.monat, angebot: a }) },
+      t("zeile.anfragen"))),
   )));
   $("#keine-angebote").hidden = total > 0;
   const mehr = $("#mehr");
@@ -346,7 +469,52 @@ function zeichneTabelle() {
   mehr.textContent = state.alleZeigen ? t("resultat.weniger") : t("resultat.alle", { anzahl: total });
 }
 
-// ------------------------------------------------------------------ Gesamtkosten
+function kombiZeilen() {
+  const r = state.resultat;
+  return r.personen.map((p, i) => r.alternativen[i].find((a) => a.tarif_id === state.kombiWahl[i])
+    || r.kombination.personen[i]);
+}
+
+function zeichneKombination() {
+  const r = state.resultat;
+  const body = $("#kombi-tabelle tbody");
+  const fuss = $("#kombi-tabelle tfoot");
+  if (!r.kombination) {
+    body.replaceChildren();
+    fuss.replaceChildren();
+    $("#kombi-keine").hidden = false;
+    $("#kombi-anfragen").hidden = true;
+    return;
+  }
+  $("#kombi-keine").hidden = true;
+  $("#kombi-anfragen").hidden = false;
+  const zeilen = kombiZeilen();
+  body.replaceChildren(...r.personen.map((p, i) => {
+    const a = zeilen[i];
+    const auswahl = el("select", {
+      class: "kombi-wahl", "aria-label": t("kombination.alternative", { name: p.name }),
+      onchange: (e) => { state.kombiWahl[i] = parseInt(e.target.value, 10); zeichneKombination(); },
+    }, r.alternativen[i].map((x) => el("option", { value: x.tarif_id, selected: x.tarif_id === a.tarif_id },
+      `${x.versicherer} – ${x.tarifbezeichnung}: ${chf(x.monat)}`)));
+    return el("tr", {},
+      el("td", { "data-label": t("kombination.person") }, el("strong", {}, p.name),
+        el("small", { class: "unter" }, `${p.geburtsjahr} · CHF ${fmt0.format(p.franchise_betrag)} · ${p.mit_unfall ? t("form.unfall.ja") : t("form.unfall.nein")}`)),
+      el("td", { "data-label": t("spalte.versicherer") },
+        el("button", { type: "button", class: "link", onclick: () => zeigeVersicherer(a.bag_nr) }, a.versicherer),
+        el("div", {}, auswahl)),
+      el("td", { "data-label": t("spalte.modell") }, el("span", { class: "modell" }, a.modell), " ", a.tarifbezeichnung,
+        a.rabatt ? el("span", { class: "badge rabatt" }, t("zeile.rabatt.kurz")) : null),
+      el("td", { class: "zahl stark", "data-label": t("kombination.praemie") }, chf(a.monat)));
+  }));
+  const monat = rund(zeilen.reduce((s, z) => s + z.monat, 0));
+  const gem0 = r.gemeinsam.angebote[0]?.monat;
+  fuss.replaceChildren(el("tr", { class: "summe" },
+    el("td", { colspan: 3 }, t("kombination.total"),
+      gem0 !== undefined ? el("small", { class: "unter" }, t("kombination.vergleich", { diff: diff(rund(monat - gem0)) })) : null),
+    el("td", { class: "zahl" }, el("strong", {}, chf(monat)), el("small", { class: "unter jahr" }, `${chf(rund(monat * 12))} ${t("pro_jahr")}`))));
+}
+
+// ------------------------------------------------------------------ Gesamtkosten (pro Person)
 function bindeKosten() {
   const betrag = $("#kosten-betrag");
   const slider = $("#kosten-slider");
@@ -354,19 +522,36 @@ function bindeKosten() {
   betrag.addEventListener("input", () => { slider.value = betrag.value; neu(); });
   slider.addEventListener("input", () => { betrag.value = slider.value; neu(); });
   $("#kosten-tarif").addEventListener("change", ladeKosten);
+  $("#kosten-person").addEventListener("change", ladeKosten);
+}
+
+function fuellePersonenFuerKosten() {
+  const r = state.resultat;
+  const sel = $("#kosten-person");
+  const bisher = sel.value;
+  sel.replaceChildren(...r.personen.map((p, i) => el("option", { value: i }, `${p.name} (${p.geburtsjahr})`)));
+  if ([...sel.options].some((o) => o.value === bisher)) sel.value = bisher;
+  $("#kosten-person-feld").hidden = r.personen.length < 2;
+
+  const tarif = $("#kosten-tarif");
+  const bisherT = tarif.value;
+  tarif.replaceChildren(el("option", { value: "" }, t("kosten.angebot.guenstigstes")),
+    ...r.gemeinsam.angebote.slice(0, 50).map((a) => el("option", { value: a.tarif_id }, `${a.versicherer} – ${a.tarifbezeichnung}`)));
+  if ([...tarif.options].some((o) => o.value === bisherT)) tarif.value = bisherT;
 }
 
 async function ladeKosten() {
-  if (!state.resultat) return;
-  const p = eingaben();
+  const r = state.resultat;
+  if (!r) return;
+  const p = r.personen[parseInt($("#kosten-person").value || "0", 10)] || r.personen[0];
   const kosten = Math.max(0, parseFloat($("#kosten-betrag").value) || 0);
   try {
-    const r = await api("/api/gesamtkosten", {
-      bfs: p.bfs, geburtsjahr: p.geburtsjahr, unfall: p.unfall, modell: p.modell,
-      kinderrabatt: p.kinderrabatt, kosten, tarif_id: $("#kosten-tarif").value || null,
+    const k = await api("/api/gesamtkosten", {
+      bfs: r.kontext.gemeinde.bfs_nr, geburtsjahr: p.geburtsjahr, unfall: p.mit_unfall,
+      modell: r.kontext.modell, kinderrabatt: p.geschwisterrabatt, kosten, tarif_id: $("#kosten-tarif").value || null,
     });
-    $("#kosten-text").textContent = t("kosten.text", { max: fmt0.format(r.max_selbstbehalt) });
-    $("#kosten-tabelle tbody").replaceChildren(...r.zeilen.map((z) => el("tr", { class: z.optimal ? "optimal" : null },
+    $("#kosten-text").textContent = t("kosten.text", { max: fmt0.format(k.max_selbstbehalt) });
+    $("#kosten-tabelle tbody").replaceChildren(...k.zeilen.map((z) => el("tr", { class: z.optimal ? "optimal" : null },
       el("td", { "data-label": t("kosten.franchise") }, `CHF ${fmt0.format(z.franchise_betrag)}`,
         z.optimal ? el("span", { class: "badge gut" }, t("kosten.optimal")) : null),
       z.angebot
@@ -402,7 +587,7 @@ async function zeigeVersicherer(bagNr) {
     $("#vers-titel").textContent = v.name_kurz;
     const adresse = [v.strasse, v.postfach, [v.plz, v.ort].filter(Boolean).join(" ")].filter(Boolean);
     const taet = v.taetigkeit.length >= 26 && v.taetigkeit.every((x) => x.region_nr === null)
-      ? "ganze Schweiz"
+      ? t("versicherer.ganze_schweiz")
       : v.taetigkeit.map((x) => (x.region_nr === null ? x.kanton : `${x.kanton} (Region ${x.region_nr})`)).join(", ");
     const zeile = (label, wert) => (wert ? [el("dt", {}, label), el("dd", {}, wert)] : []);
     const namen = [...new Set([v.name_de, v.name_fr, v.name_it].filter(Boolean))];
@@ -423,24 +608,48 @@ async function zeigeVersicherer(bagNr) {
   }
 }
 
-function oeffneAnfrage(angebot) {
-  state.anfrageAngebot = angebot;
-  const k = state.resultat.kontext;
+function oeffneAnfrage(auswahl) {
+  const r = state.resultat;
+  state.anfrage = auswahl;
+  const haushalt = r.personen.length > 1;
+  const g = r.kontext.gemeinde;
+  const kopf = auswahl.modus === "gemeinsam"
+    ? el("p", {}, el("strong", {}, auswahl.angebot.versicherer), ` · ${auswahl.angebot.modell} – ${auswahl.angebot.tarifbezeichnung}`)
+    : el("p", {}, el("strong", {}, t("modus.kombination")),
+      ` · ${t("kombination.versicherer", { anzahl: new Set(auswahl.zeilen.map((z) => z.bag_nr)).size })}`);
   $("#anfrage-wahl").replaceChildren(
     el("h3", {}, t("anfrage.wahl")),
-    el("p", {}, el("strong", {}, angebot.versicherer), ` · ${angebot.modell} – ${angebot.tarifbezeichnung}`),
-    el("p", { class: "preis" }, chf(angebot.monat), el("small", {}, ` ${t("pro_monat")} · ${chf(angebot.jahr)} ${t("pro_jahr")}`)),
-    el("p", { class: "hilfe" }, t("resultat.kontext", {
-      gemeinde: k.gemeinde.gemeinde, kanton: k.gemeinde.kanton, region: k.gemeinde.region_nr,
-      klasse: state.altersklasse.name, franchise: `CHF ${fmt0.format(k.franchise_betrag)}`,
-      unfall: k.mit_unfall ? t("form.unfall.ja") : t("form.unfall.nein"),
-    })),
+    kopf,
+    el("p", { class: "preis" }, chf(auswahl.monat),
+      el("small", {}, ` ${t("pro_monat")} · ${chf(rund(auswahl.monat * 12))} ${t("pro_jahr")}${haushalt ? ` · ${t("anfrage.total_personen", { anzahl: r.personen.length })}` : ""}`)),
+    haushalt ? el("ul", { class: "wahl-personen" }, r.personen.map((p, i) => el("li", {},
+      `${p.name} (${p.geburtsjahr}): `,
+      auswahl.modus === "kombination" ? `${auswahl.zeilen[i].versicherer} – ${auswahl.zeilen[i].tarifbezeichnung}, ` : "",
+      el("strong", {}, chf(auswahl.zeilen[i].monat))))) : null,
+    el("p", { class: "hilfe" }, `${g.gemeinde} (${g.kanton}, Region ${g.region_nr})`),
   );
+
+  // Namen der versicherten Personen (vorausgefüllt aus dem Rechner, Pflicht)
+  const liste = $("#anfrage-personen");
+  liste.replaceChildren(...r.personen.map((p, i) => {
+    const vorgabe = $(".p-name", state.personen[i].el).value.trim();
+    return el("div", { class: "feld" },
+      el("label", { for: `a-person-${i}` }, `${t("anfrage.person.name", { n: i + 1 })} (${p.geburtsjahr}) *`),
+      el("input", { id: `a-person-${i}`, class: "a-person-name", required: true, maxlength: 80, value: vorgabe || null,
+        placeholder: t("form.person.name.platzhalter"), autocomplete: "off" }));
+  }));
+
+  // Kontaktperson aus der ersten Person vorschlagen
+  const erster = $(".p-name", state.personen[0].el).value.trim().split(/\s+/);
+  if (erster[0] && !$("#a-vorname").value) $("#a-vorname").value = erster[0];
+  if (erster.length > 1 && !$("#a-nachname").value) $("#a-nachname").value = erster.slice(1).join(" ");
+
   $("#anfrage-fehler").hidden = true;
   $("#anfrage-formular-bereich").hidden = false;
   $("#anfrage-danke").hidden = true;
   $("#dlg-anfrage").showModal();
-  $("#a-vorname").focus();
+  const leer = $$(".a-person-name").find((n) => !n.value) || $("#a-vorname");
+  leer.focus();
 }
 
 async function sendeAnfrage(e) {
@@ -455,16 +664,15 @@ async function sendeAnfrage(e) {
   }
   const f = Object.fromEntries(new FormData(form));
   const p = eingaben();
+  const namen = $$(".a-person-name").map((n) => n.value.trim());
   const body = {
-    bfs_nr: p.bfs,
-    geburtsjahr: p.geburtsjahr,
-    mit_unfall: p.unfall === "true",
-    franchise: p.franchise,
-    modell: p.modell === "alle" ? null : p.modell,
+    bfs_nr: p.bfs_nr,
+    modell: p.modell,
     kinderrabatt: p.kinderrabatt,
-    tarif_id: state.anfrageAngebot.tarif_id,
-    aktueller_versicherer: p.aktueller_versicherer ? parseInt(p.aktueller_versicherer, 10) : null,
-    aktuelle_praemie: p.aktuelle_praemie ? parseFloat(p.aktuelle_praemie) : null,
+    modus: state.anfrage.modus,
+    aktueller_versicherer: p.aktueller_versicherer,
+    aktuelle_praemie: p.aktuelle_praemie,
+    personen: p.personen.map((x, i) => ({ ...x, name: namen[i], tarif_id: state.anfrage.zeilen[i].tarif_id })),
     einwilligung: $("#a-einwilligung").checked,
     website: f.website || null,
     kontakt: {
@@ -477,9 +685,9 @@ async function sendeAnfrage(e) {
   knopf.disabled = true;
   knopf.textContent = t("anfrage.sendet");
   try {
-    const r = await api("/api/anfrage", null, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
+    const r = await post("/api/anfrage", body);
+    // Namen in den Rechner übernehmen
+    namen.forEach((n, i) => { if (state.personen[i]) $(".p-name", state.personen[i].el).value = n; });
     $("#anfrage-formular-bereich").hidden = true;
     $("#anfrage-danke-text").textContent = t("anfrage.danke.text", { id: r.lead_id });
     $("#anfrage-danke").hidden = false;
@@ -494,34 +702,45 @@ async function sendeAnfrage(e) {
 }
 
 // ------------------------------------------------------------------ URL-Zustand (teilbare Links)
+// p=Name~Jahrgang~Unfall(1/0)~Franchise, mehrfach für Haushalte
 function zustandInUrl(p) {
   const u = new URLSearchParams();
-  for (const [k, v] of Object.entries(p)) if (v !== null && v !== undefined && v !== "" && v !== false) u.set(k, v);
+  u.set("bfs", p.bfs_nr);
+  p.personen.forEach((x) => u.append("p", [x.name, x.geburtsjahr, x.mit_unfall ? 1 : 0, x.franchise].join("~")));
+  if (p.modell) u.set("modell", p.modell);
+  if (!p.kinderrabatt) u.set("kinderrabatt", "0");
+  if (p.aktueller_versicherer) u.set("aktuell", p.aktueller_versicherer);
+  if (p.aktuelle_praemie) u.set("praemie", p.aktuelle_praemie);
+  if (p.personen.length > 1 && state.modus !== "gemeinsam") u.set("modus", state.modus);
+  if (SPRACHE !== "de") u.set("lang", SPRACHE);
   history.replaceState(null, "", `?${u}`);
 }
 
 async function zustandAusUrl() {
   const u = new URLSearchParams(location.search);
-  if (!u.get("bfs") || !u.get("geburtsjahr")) return;
+  if (!u.get("bfs") || !u.getAll("p").length) return false;
   try {
     const g = await api(`/api/gemeinden/${u.get("bfs")}`);
     const treffer = await api("/api/orte", { q: String(g.plz[0]) });
     const gem = treffer.gemeinden.find((x) => x.bfs_nr === g.bfs_nr);
-    if (!gem) return;
-    $("#geburtsjahr").value = u.get("geburtsjahr");
-    if (u.get("unfall") === "false") document.querySelector("input[name=unfall][value=false]").checked = true;
+    if (!gem) return false;
     if (u.get("modell")) $("#modell").value = u.get("modell");
-    if (u.get("kinderrabatt") === "true") $("#kinderrabatt").checked = true;
-    if (u.get("aktueller_versicherer")) $("#aktueller-versicherer").value = u.get("aktueller_versicherer");
-    if (u.get("aktuelle_praemie")) $("#aktuelle-praemie").value = u.get("aktuelle_praemie");
-    const akl = await api("/api/altersklasse", { geburtsjahr: u.get("geburtsjahr") });
-    state.altersklasse = akl;
-    $("#geburtsjahr-info").textContent = t("form.geburtsjahr.info", { alter: akl.alter, jahr: akl.praemienjahr, klasse: akl.name });
-    $("#kinderrabatt-feld").hidden = akl.code !== "AKL-KIN";
-    fuelleFranchisen(akl.code, u.get("franchise"));
+    if (u.get("kinderrabatt") === "0") $("#kinderrabatt").checked = false;
+    if (u.get("aktuell")) $("#aktueller-versicherer").value = u.get("aktuell");
+    if (u.get("praemie")) {
+      $("#aktuelle-praemie").value = u.get("praemie");
+    }
+    if (u.get("aktuell") || u.get("praemie")) $("details.aktuell").open = true;
+    if (u.get("modus") === "kombination") state.modus = "kombination";
+    await Promise.all(u.getAll("p").slice(0, MAX_PERSONEN).map((s) => {
+      const [name, jahr, unfall, franchise] = s.split("~");
+      return personHinzufuegen({ name, geburtsjahr: jahr, unfall: unfall !== "0", franchise });
+    }));
     waehleGemeinde(gem);
+    return true;
   } catch (e) {
     console.warn("URL-Zustand ignoriert:", e);
+    return false;
   }
 }
 

@@ -12,9 +12,19 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from app import leads, rechner
 from app.config import ROOT, Settings, load_settings
+
+class HaushaltIn(BaseModel):
+    bfs_nr: int
+    personen: list[leads.PersonIn] = Field(min_length=1, max_length=rechner.MAX_PERSONEN)
+    modell: str | None = Field(None, description="alle | TAR-BASE | TAR-HAM | TAR-HMO | TAR-DIV")
+    kinderrabatt: bool = Field(True, description="Geschwisterrabatt ab dem 2. Kind (günstigste Rabattstufe)")
+    aktueller_versicherer: int | None = None
+    aktuelle_praemie: float | None = Field(None, gt=0, lt=20000, description="aktuelle Monatsprämie des Haushalts")
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 FRONTEND = ROOT / "frontend"
@@ -104,6 +114,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         res = handle(rechner.praemien, con, a, aktueller_versicherer, aktueller_tarif, aktuelle_praemie)
         res["kontext"]["geburtsjahr"] = geburtsjahr
         return res
+
+    @app.post("/api/haushalt", tags=["Prämien"])
+    def post_haushalt(body: HaushaltIn, con=Depends(db)):
+        """Prämien für eine oder mehrere Personen (Paare, Familien) am gleichen Wohnort.
+
+        Liefert immer beide Varianten: `gemeinsam` (alle beim gleichen Versicherer und Modell)
+        und `kombination` (je Person das günstigste Angebot).
+        """
+        personen = [rechner.Person(p.name, p.geburtsjahr, p.mit_unfall, p.franchise) for p in body.personen]
+        modell = None if body.modell in (None, "", "alle") else body.modell
+        return handle(rechner.haushalt, con, body.bfs_nr, personen, modell, body.kinderrabatt,
+                      body.aktueller_versicherer, body.aktuelle_praemie)
 
     @app.get("/api/gesamtkosten", tags=["Prämien"])
     def get_gesamtkosten(

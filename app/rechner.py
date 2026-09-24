@@ -310,10 +310,167 @@ def praemien(con: sqlite3.Connection, a: Anfrage, aktueller_versicherer: int | N
     }
 
 
-def angebot_finden(con: sqlite3.Connection, a: Anfrage, tarif_id: int) -> tuple[dict | None, dict]:
-    """Ein einzelnes Angebot serverseitig nachrechnen (z.B. für Leads)."""
-    res = praemien(con, a)
-    return next((x for x in res["angebote"] if x["tarif_id"] == tarif_id), None), res
+# --------------------------------------------------------------------------
+# Haushalt (Paare, Familien)
+# --------------------------------------------------------------------------
+
+MAX_PERSONEN = 10
+HINWEIS_KEIN_AKTUELL = "Für den aktuellen Versicherer gibt es mit diesen Angaben kein Angebot in Ihrer Gemeinde."
+
+
+@dataclass
+class Person:
+    name: str
+    geburtsjahr: int
+    mit_unfall: bool
+    franchise: str
+
+
+def _personen_basis(con: sqlite3.Connection, bfs_nr: int, personen: list[Person], modell: str | None,
+                    kinderrabatt: bool) -> tuple[dict, list[dict], list[dict[int, dict]]]:
+    """Prüft die Personen und liefert je Person alle verfügbaren Angebote (tarif_id -> Angebot).
+
+    Geschwisterrabatt: Das älteste Kind zahlt die reguläre Kinderprämie (K1).
+    Für alle weiteren Kinder wird – falls `kinderrabatt` – die günstigste
+    Rabattstufe des jeweiligen Versicherers verwendet (Näherung, siehe README).
+    """
+    if not personen:
+        raise RechnerFehler("Mindestens eine Person erfassen")
+    if len(personen) > MAX_PERSONEN:
+        raise RechnerFehler(f"Höchstens {MAX_PERSONEN} Personen pro Haushalt")
+    info, anfragen = [], []
+    for i, p in enumerate(personen):
+        akl = altersklasse_fuer(con, p.geburtsjahr)
+        a = Anfrage(bfs_nr=bfs_nr, altersklasse=akl["code"], mit_unfall=p.mit_unfall, franchise=p.franchise,
+                    modell=modell)
+        anfragen.append(a)
+        info.append({"index": i, "name": (p.name or "").strip() or f"Person {i + 1}", "geburtsjahr": p.geburtsjahr,
+                     "alter": akl["alter"], "altersklasse": akl["code"], "altersklasse_name": akl["name"],
+                     "mit_unfall": p.mit_unfall, "franchise": p.franchise,
+                     "franchise_betrag": int(p.franchise.split("-")[1]), "geschwisterrabatt": False})
+    kinder = sorted((x for x in info if x["altersklasse"] == "AKL-KIN"), key=lambda x: (x["geburtsjahr"], x["index"]))
+    for k in kinder[1:]:
+        if kinderrabatt:
+            k["geschwisterrabatt"] = True
+            anfragen[k["index"]].kinderrabatt = True
+
+    g = None
+    angebote: list[dict[int, dict]] = []
+    for a in anfragen:
+        g = _pruefe(con, a)
+        best = _waehle_untergruppe(_angebote_roh(con, a, g, a.franchise), a)
+        angebote.append({tid: _angebot(r) for (tid, _f), r in best.items()})
+    for x, ang in zip(info, angebote):
+        x["anzahl_angebote"] = len(ang)
+    return g, info, angebote
+
+
+def _person_zeile(p: dict, ang: dict) -> dict:
+    return {"index": p["index"], "name": p["name"], **ang}
+
+
+def _summe(werte) -> float:
+    return round(sum(werte), 2)
+
+
+def haushalt(con: sqlite3.Connection, bfs_nr: int, personen: list[Person], modell: str | None = None,
+             kinderrabatt: bool = True, aktueller_versicherer: int | None = None,
+             aktuelle_praemie: float | None = None) -> dict:
+    """Prämien für einen Haushalt – beide Varianten werden immer berechnet:
+
+    - `gemeinsam`: alle Personen beim gleichen Versicherer im gleichen Modell (Tarif),
+      sortiert nach Gesamtprämie. Nur Tarife, die für alle Personen erhältlich sind.
+    - `kombination`: je Person das günstigste Angebot (Versicherer frei gemischt).
+    """
+    g, info, angebote = _personen_basis(con, bfs_nr, personen, modell, kinderrabatt)
+
+    gemeinsame_ids = set(angebote[0]).intersection(*angebote[1:]) if angebote else set()
+    gemeinsam = []
+    for tid in gemeinsame_ids:
+        erste = angebote[0][tid]
+        zeilen = [_person_zeile(p, angebote[p["index"]][tid]) for p in info]
+        monat = _summe(z["monat"] for z in zeilen)
+        gemeinsam.append({
+            "tarif_id": tid, "bag_nr": erste["bag_nr"], "versicherer": erste["versicherer"], "gruppe": erste["gruppe"],
+            "tarif_code": erste["tarif_code"], "tarifbezeichnung": erste["tarifbezeichnung"],
+            "tariftyp": erste["tariftyp"], "modell": erste["modell"],
+            "rabatt": any(z["rabatt"] for z in zeilen),
+            "monat": monat, "jahr": round(monat * 12, 2), "personen": zeilen,
+        })
+    gemeinsam.sort(key=lambda x: (x["monat"], x["versicherer"].lower(), x["tarifbezeichnung"]))
+
+    kombination = None
+    if all(angebote):
+        zeilen = [_person_zeile(p, min(angebote[p["index"]].values(),
+                                       key=lambda a: (a["monat"], a["versicherer"].lower(), a["tarifbezeichnung"])))
+                  for p in info]
+        monat = _summe(z["monat"] for z in zeilen)
+        kombination = {"monat": monat, "jahr": round(monat * 12, 2), "personen": zeilen,
+                       "anzahl_versicherer": len({z["bag_nr"] for z in zeilen})}
+    alternativen = [
+        [_person_zeile(p, a) for a in sorted(angebote[p["index"]].values(),
+                                             key=lambda a: (a["monat"], a["versicherer"].lower()))[:5]]
+        for p in info]
+
+    # Referenz aktueller Versicherer: Summe der Standardmodelle (oder eingegebene Gesamtprämie)
+    aktuell, hinweis = None, None
+    if aktuelle_praemie is not None:
+        aktuell = {"quelle": "eingegeben", "monat": round(aktuelle_praemie, 2), "jahr": round(aktuelle_praemie * 12, 2)}
+    elif aktueller_versicherer is not None:
+        basis = angebote if modell in (None, "TAR-BASE") else _personen_basis(
+            con, bfs_nr, personen, "TAR-BASE", kinderrabatt)[2]
+        ref = []
+        for p in info:
+            a = next((x for x in basis[p["index"]].values()
+                      if x["bag_nr"] == aktueller_versicherer and x["tariftyp"] == "TAR-BASE"), None)
+            if a is None:
+                ref = None
+                break
+            ref.append(_person_zeile(p, a))
+        if ref:
+            monat = _summe(z["monat"] for z in ref)
+            aktuell = {"quelle": "tarif", "bag_nr": aktueller_versicherer, "versicherer": ref[0]["versicherer"],
+                       "tarif_id": ref[0]["tarif_id"], "tarifbezeichnung": ref[0]["tarifbezeichnung"],
+                       "modell": ref[0]["modell"], "monat": monat, "jahr": round(monat * 12, 2), "personen": ref}
+        else:
+            hinweis = HINWEIS_KEIN_AKTUELL
+
+    guenstigste = gemeinsam[0]["monat"] if gemeinsam else None
+    for i, x in enumerate(gemeinsam, start=1):
+        x["rang"] = i
+        x["diff_guenstigste_monat"] = round(x["monat"] - guenstigste, 2)
+        x["diff_guenstigste_jahr"] = round(x["diff_guenstigste_monat"] * 12, 2)
+        x["diff_aktuell_monat"] = round(x["monat"] - aktuell["monat"], 2) if aktuell else None
+        x["diff_aktuell_jahr"] = round(x["diff_aktuell_monat"] * 12, 2) if aktuell else None
+        x["ist_aktuell"] = bool(aktuell and aktuell.get("tarif_id") == x["tarif_id"])
+    if kombination:
+        kombination["diff_gemeinsam_monat"] = round(kombination["monat"] - guenstigste, 2) if guenstigste else None
+        kombination["diff_aktuell_monat"] = round(kombination["monat"] - aktuell["monat"], 2) if aktuell else None
+
+    return {
+        "kontext": {"gemeinde": g, "modell": modell, "kinderrabatt": kinderrabatt, "praemienjahr": praemienjahr(con)},
+        "personen": info,
+        "gemeinsam": {"anzahl": len(gemeinsam), "guenstigste_monat": guenstigste, "angebote": gemeinsam},
+        "kombination": kombination,
+        "alternativen": alternativen,
+        "aktuell": aktuell,
+        "hinweis_aktuell": hinweis,
+    }
+
+
+def haushalt_auswahl(con: sqlite3.Connection, bfs_nr: int, personen: list[Person], tarif_ids: list[int],
+                     modell: str | None = None, kinderrabatt: bool = True) -> tuple[list[dict], list[dict]]:
+    """Prüft eine gewählte Zuordnung Person -> Tarif und liefert die serverseitig berechneten Angebote."""
+    if len(tarif_ids) != len(personen):
+        raise RechnerFehler("Für jede Person muss ein Angebot gewählt sein")
+    _g, info, angebote = _personen_basis(con, bfs_nr, personen, modell, kinderrabatt)
+    gewaehlt = []
+    for p, tid in zip(info, tarif_ids):
+        a = angebote[p["index"]].get(tid)
+        if a is None:
+            raise RechnerFehler(f"Das gewählte Angebot ist für {p['name']} nicht verfügbar.")
+        gewaehlt.append(_person_zeile(p, a))
+    return info, gewaehlt
 
 
 # --------------------------------------------------------------------------

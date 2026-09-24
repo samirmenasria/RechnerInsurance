@@ -1,7 +1,8 @@
 # Prämienrechner Grundversicherung (OKP)
 
 Webanwendung zum Vergleich der monatlichen Prämien der obligatorischen
-Krankenpflegeversicherung aller Schweizer Krankenversicherer, analog zum
+Krankenpflegeversicherung aller Schweizer Krankenversicherer – für Einzelpersonen,
+Paare und Familien –, analog zum
 Prämienrechner des BAG (priminfo.admin.ch). Mit Offertanfrage: gewählte Prämie
 und Kontaktangaben werden als Lead per E-Mail zugestellt.
 
@@ -175,12 +176,36 @@ nur in der Datei *Tarife <Jahr>* (Kategorie `ALT`), die 2026 nicht vorliegt.
 
 Umsetzung im Rechner:
 - Standardmässig wird K1 verwendet.
-- Die Option «Kinderrabatt berücksichtigen» zeigt je Angebot die günstigste
-  Rabattstufe des Versicherers. Sie ist in der Liste als «Rabattstufe K3» usw.
-  gekennzeichnet.
-- Über die API kann mit `altersuntergruppe=K3` eine bestimmte Stufe abgefragt werden.
+- Bei zwei oder mehr Kindern im Haushalt erscheint die Option «Geschwisterrabatt
+  berücksichtigen» (standardmässig eingeschaltet). Das älteste Kind zahlt K1, für jedes
+  weitere Kind wird die günstigste Rabattstufe des jeweiligen Versicherers verwendet.
+  Das ist ein Richtwert, weil die genauen Bedingungen je Versicherer ohne Tarife-Datei
+  unbekannt sind. Angebote mit Rabatt sind mit «inkl. Kinderrabatt» markiert.
+- Über `/api/praemien` kann mit `kinderrabatt=true` die günstigste Stufe oder mit
+  `altersuntergruppe=K3` eine bestimmte Stufe abgefragt werden.
 - Liegt die Tarife-Datei vor, speichert das ETL die Bezeichnungen je Versicherer in
   `versicherer_altersuntergruppe`.
+
+### Paare und Familien (Haushalt)
+
+Im Rechner lassen sich bis zu 10 Personen erfassen, jede mit Name, Jahrgang,
+Unfalldeckung und Franchise. Der Wohnort gilt für alle. Rollen wie Elternteil oder Kind
+werden nicht erfasst; die Altersklasse ergibt sich aus dem Jahrgang.
+
+Für einen Haushalt werden immer beide Varianten berechnet. Im Resultat wechselt man
+mit einem Umschalter zwischen ihnen:
+
+- **Alle beim gleichen Versicherer:** Alle Personen sind beim gleichen Versicherer im
+  gleichen Modell (Tarif) versichert. Die Liste zeigt die Gesamtprämie des Haushalts,
+  aufsteigend sortiert, mit der Aufteilung pro Person. Es erscheinen nur Tarife, die
+  für alle Personen erhältlich sind.
+- **Günstigste Kombination:** Jede Person erhält ihr günstigstes Angebot, die Versicherer
+  dürfen sich unterscheiden. Pro Person kann man eine der fünf günstigsten Alternativen
+  wählen. Angezeigt wird auch die Differenz zum günstigsten gemeinsamen Versicherer.
+
+Der Vergleich mit dem aktuellen Versicherer nimmt dessen Standardmodell für alle
+Personen oder die eingegebene Gesamtprämie des Haushalts. Die Gesamtkosten nach
+Franchise werden pro Person berechnet (Auswahlfeld «Person»).
 
 ## API
 
@@ -192,6 +217,7 @@ Umsetzung im Rechner:
 | GET | `/api/altersklasse?geburtsjahr=1985` | Altersklasse und Alter im Prämienjahr |
 | GET | `/api/versicherer`, `/api/versicherer/{bag_nr}` | Liste; Detail mit Kontakt, Tätigkeitsgebiet, Modellen, Fusionen |
 | GET | `/api/praemien?bfs=261&geburtsjahr=1985&unfall=true&franchise=FRA-300[&modell=TAR-HMO][&kinderrabatt=true][&aktueller_versicherer=1509 \| &aktueller_tarif=… \| &aktuelle_praemie=480]` | Alle Angebote, aufsteigend nach Monatsprämie, mit Differenz zum günstigsten und zum aktuellen Versicherer |
+| POST | `/api/haushalt` | Haushalt mit 1–10 Personen: `{"bfs_nr": 261, "personen": [{"name", "geburtsjahr", "mit_unfall", "franchise"}, …], "modell", "kinderrabatt", "aktueller_versicherer", "aktuelle_praemie"}`. Liefert `gemeinsam` (alle beim gleichen Versicherer), `kombination` (günstigste Mischung) und `alternativen` pro Person. |
 | GET | `/api/gesamtkosten?bfs=261&geburtsjahr=1985&unfall=true&kosten=3000[&tarif_id=…]` | Gesamtkosten für alle Franchisen, günstigste Franchise markiert |
 | GET | `/api/meta` | Prämienjahr, Quelle, Datenstand |
 | POST | `/api/anfrage` | Offertanfrage (Lead) |
@@ -199,23 +225,27 @@ Umsetzung im Rechner:
 ## Offertanfrage (Lead)
 
 Ablauf:
-1. In der Resultatliste klickt die Person bei einem Angebot auf **Anfragen** und
-   füllt das Formular aus: Anrede, Name, E-Mail, Telefon, optional Adresse,
-   Geburtsdatum, Erreichbarkeit und Bemerkung.
-2. Die Einwilligung zur Weitergabe ist Pflicht.
-3. Der Server rechnet das gewählte Angebot aus den Rechner-Eingaben neu. Preise aus
-   dem Browser werden nie übernommen.
-4. Die E-Mail an `LEAD_EMPFAENGER` enthält:
+1. In der Resultatliste klickt man bei einem Angebot auf **Anfragen**, in der
+   Variante «Günstigste Kombination» auf **Diese Kombination anfragen**.
+2. Im Formular werden die Namen aller versicherten Personen (aus dem Rechner
+   vorausgefüllt, Pflicht) und die Kontaktperson erfasst: Anrede, Name, E-Mail,
+   Telefon, optional Adresse, Geburtsdatum, Erreichbarkeit und Bemerkung.
+3. Die Einwilligung zur Weitergabe ist Pflicht.
+4. Der Server rechnet die gewählten Angebote aus den Rechner-Eingaben neu. Preise aus
+   dem Browser werden nie übernommen. Bei «alle beim gleichen Versicherer» muss für
+   alle Personen derselbe Tarif gewählt sein.
+5. Die E-Mail an `LEAD_EMPFAENGER` enthält:
    - Kontaktangaben
-   - Wohngemeinde mit Kanton und Region
-   - Geburtsjahr und Altersklasse
-   - Unfalldeckung, Franchise und Modellfilter
-   - die gewählte Prämie (Versicherer, Modell, Tarif, Monat, Jahr, Rang)
-   - das günstigste Angebot, den aktuellen Versicherer und die Ersparnis
-   - die fünf nächsten Alternativen
+   - Wohngemeinde mit Kanton und Region, Variante und Modellfilter
+   - pro Person: Name, Jahrgang, Alter, Altersklasse, Franchise, Unfalldeckung sowie
+     Versicherer, Modell und Monatsprämie (inkl. Hinweis auf Kinderrabatt)
+   - das Total des Haushalts pro Monat und Jahr (bei gemeinsamem Versicherer mit Rang)
+   - den günstigsten gemeinsamen Versicherer, die günstigste Kombination, den
+     aktuellen Versicherer und die Ersparnis
+   - die fünf günstigsten Angebote beim gleichen Versicherer
 
    `Reply-To` ist die Adresse der anfragenden Person.
-5. Jeder Lead wird in `leads.sqlite` mit Status `gesendet`, `outbox` oder `fehler`
+6. Jeder Lead wird in `leads.sqlite` mit Status `gesendet`, `outbox` oder `fehler`
    gespeichert. Scheitert der Versand, liegt die Nachricht zusätzlich als `.eml` in
    der Outbox. Es geht also kein Lead verloren.
 

@@ -93,8 +93,6 @@ a { color: var(--link); }
   margin-bottom: 20px;
   min-width: 0;
 }
-.eingaben { position: sticky; top: 16px; }
-@media (max-width: 900px) { .eingaben { position: static; } }
 
 /* ---------------------------------------------------------------- Formular */
 .feld { margin: 0 0 18px; border: 0; padding: 0; min-width: 0; }
@@ -160,8 +158,39 @@ button { font: inherit; cursor: pointer; }
   background: var(--akzent-hell); border-radius: var(--radius-klein); padding: 10px 14px; font-weight: 500;
 }
 
+/* Personen */
+.person {
+  border: 1px solid var(--linie); border-radius: var(--radius-klein); padding: 14px 14px 2px; margin: 0 0 12px;
+  background: var(--karte-grau); min-width: 0;
+}
+.person-kopf { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.person-titel { font-weight: 700; color: var(--blau-text); padding: 0; margin: 0; float: none; }
+.person-entfernen { font-weight: 600; font-size: .85rem; color: var(--gedaempft); }
+.person .feld { margin-bottom: 12px; }
+.label { display: block; font-weight: 600; margin-bottom: 6px; }
+.voll { width: 100%; margin-top: 0; }
+.abstand-oben { margin-top: 18px; }
+
 /* ---------------------------------------------------------------- Resultate */
-.zusammenfassung { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 18px; }
+.zusammenfassung { display: flex; flex-direction: column; gap: 14px; }
+.zusammenfassung-kopf { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.zusammenfassung .hilfe { margin: 0; }
+.modus { display: inline-flex; background: var(--akzent-hell); border-radius: 999px; padding: 4px; gap: 4px; flex-wrap: wrap; }
+.modus button {
+  border: 0; background: transparent; color: var(--link); font-weight: 600; padding: 8px 16px; border-radius: 999px;
+  transition: background .15s, color .15s;
+}
+.modus button.an { background: var(--blau-knopf); color: #fff; box-shadow: var(--schatten); }
+@media (max-width: 560px) {
+  .modus { display: grid; grid-template-columns: 1fr 1fr; width: 100%; border-radius: var(--radius-klein); }
+  .modus button { border-radius: 10px; padding: 8px 10px; font-size: .9rem; line-height: 1.25; }
+}
+.personen-aufteilung { margin-top: 4px; }
+.kombi-wahl { margin-top: 6px; font-size: .85rem; padding: 6px 10px; max-width: 360px; }
+.tabelle tfoot td { border-top: 2px solid var(--blau); border-bottom: 0; padding-top: 12px; font-weight: 700; }
+.kombi-anfragen { width: auto; margin-top: 16px; }
+.formular-titel { font-size: 1rem; color: var(--blau-text); margin: 6px 0 10px; }
+.wahl-personen { margin: 6px 0; padding-left: 18px; }
 .zusammenfassung h2 { font-size: 1.5rem; }
 .kontext { color: var(--gedaempft); margin: 0; }
 .kennzahlen { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -179,8 +208,10 @@ button { font: inherit; cursor: pointer; }
 
 .filter { margin-bottom: 14px; }
 .resultate { min-width: 0; }
-.scroll { overflow-x: auto; position: relative; }
-.tabelle small.unter { display: block; color: var(--gedaempft); font-size: .78rem; font-weight: 400; }
+.scroll { overflow-x: auto; position: relative; container: tabelle / inline-size; }
+.tabelle small.unter { display: block; color: var(--gedaempft); font-size: .78rem; font-weight: 400; white-space: normal; }
+.tabelle .link { hyphens: auto; overflow-wrap: anywhere; }
+.tabelle small.unter.jahr { white-space: nowrap; }
 .tabelle th.zahl { text-align: right; white-space: normal; }
 .tabelle { width: 100%; border-collapse: collapse; font-size: .92rem; }
 .tabelle th {
@@ -211,8 +242,8 @@ button { font: inherit; cursor: pointer; }
 @media (max-width: 640px) { .kosten-eingabe { grid-template-columns: 1fr; } }
 #kosten-slider { width: 100%; margin-top: 10px; accent-color: var(--blau-knopf); }
 
-/* Tabellen als Karten auf schmalen Bildschirmen */
-@media (max-width: 720px) {
+/* Tabellen als Karten, sobald ihr Container schmal ist (Handy, schmale Desktop-Fenster) */
+@container tabelle (max-width: 700px) {
   .tabelle thead { display: none; }
   .tabelle, .tabelle tbody, .tabelle tr, .tabelle td { display: block; width: 100%; }
   .tabelle tr { border: 1px solid var(--linie); border-radius: var(--radius-klein); margin-bottom: 12px; padding: 8px 12px; box-shadow: var(--schatten); }
@@ -220,6 +251,9 @@ button { font: inherit; cursor: pointer; }
   .tabelle tbody tr:hover td { background: transparent; }
   .tabelle td::before { content: attr(data-label); float: left; margin-right: 12px; color: var(--gedaempft); font-size: .8rem; text-align: left; }
   .tabelle td.aktion::before { content: none; }
+  .tabelle tfoot tr { box-shadow: none; border-color: var(--blau); }
+  .personen-aufteilung { text-align: right; }
+  .kombi-wahl { max-width: none; }
   .tabelle td.aktion .primaer { width: 100%; margin-top: 4px; }
   .tabelle tr.ist-aktuell, .tabelle tr.optimal { background: var(--akzent-hell); }
   .tabelle tr.ist-aktuell td, .tabelle tr.optimal td { background: transparent; }
